@@ -136,14 +136,15 @@ func httpsAddrMaker(addr string) string {
 
 //var es *eventStatus
 
-func getEvent() {
+func getEvent(watchType string) {
 	//es.load = true
 
 	//events := make([]ds.Event, 0)
 
 	oc := oshandler.NewOpenshiftClient("Bearer h4IqusemStY7JIPgVL0fmUBxYf2Vo2S8n1s3hJliuSY")
 	fmt.Println("new client.....")
-	watchStatus, _, err := oc.KWatch("/namespaces/team12/events")
+	uri := "/namespaces/team12/" + watchType
+	watchStatus, _, err := oc.KWatch(uri)
 	if err != nil {
 		fmt.Println("KWatch err:", err)
 		return
@@ -152,23 +153,49 @@ func getEvent() {
 	go func() {
 		fmt.Println("Watch......")
 		event := ds.Event{}
+		//object := ds.ResourcequotasObject{}
+		//event.Object = &object
+
 		for {
 			status, _ := <-watchStatus
 			if status.Err == nil {
 				//load = true
-				err := json.Unmarshal(status.Info, &event)
-				if err != nil {
-					fmt.Println("Unmarshal err:", err)
-					return
+				switch watchType {
+				case "events":
+					object := ds.EventObject{}
+					event.Object = &object
+					fmt.Println("watch type:", watchType)
+					err := json.Unmarshal(status.Info, &event)
+					if err != nil {
+						fmt.Println("Unmarshal err:", err)
+						return
+					}
+
+					if event.Type == "ADDED" && event.Object.(*ds.EventObject).Reason == "Started" && judgeEvent(event) {
+						sendToSlack(event)
+					}
+
+				case "resourcequotas":
+					object := ds.ResourcequotasObject{}
+					event.Object = &object
+					fmt.Println("watch type:", watchType)
+					json.Unmarshal(status.Info, &event)
+					if err != nil {
+						fmt.Println("Unmarshal err:", err)
+						return
+					}
+					//fmt.Println(event.Object)
+					sendToSlack(event)
 				}
+
 				//events = append(events, event)
 				//if es.load {
 				//	events = append(events, event)
 				//}
 
-				if event.Type == "ADDED" && event.Object.Reason == "Started" && judgeEvent(event) {
-					//sendToSlack(event)
-				}
+				//if event.Type == "ADDED" && event.Object.Reason == "Started" && judgeEvent(event) {
+				//	//sendToSlack(event)
+				//}
 			}
 
 			//if es.load == false && len(es.events) != 0 {
@@ -194,7 +221,7 @@ func getEvent() {
 //}
 
 func judgeEvent(event ds.Event) bool {
-	pod := event.Object.InvolvedObject.Name
+	pod := event.Object.(*ds.EventObject).InvolvedObject.Name
 	strs := strings.Split(pod, "-")
 	if strs[len(strs)-1] != "deploy" {
 		return true
@@ -207,13 +234,43 @@ func sendToSlack(event ds.Event) {
 	fmt.Println("begin sendToSlack......")
 	defer fmt.Println("end sendToSlack......")
 
-	msg := ds.SlackMsg{Channel:"#datafoundry", Username:"webhookbot", Icon_emoji:":ghost:"}
+	msg := ds.SlackMsg{Channel: "#datafoundry", Username: "webhookbot", Icon_emoji: ":ghost:"}
 
-	text := fmt.Sprintf("projiect: %s\npod: %s\nhost: %s\nbuild succeed!",
-		event.Object.InvolvedObject.Namespace,
-		event.Object.InvolvedObject.Name,
-		event.Object.Source.Host)
-	msg.Text = text
+	//fmt.Println(event.Object.(*ds.ResourcequotasObject).Metadata)
+
+	//value, ok := event.Object.(*ds.ResourcequotasObject)
+	//fmt.Println(ok)
+	//if ok {
+	//	fmt.Println("this is ResourcequotasObject")
+	//		text := fmt.Sprintf("project: %s\ntotal(cpu: %s, memory: %s)\nused(cpu: %s, memory: %s)\nrest: ",
+	//			value.Metadata.Namespace,
+	//			value.Spec.Hard.RequestsCpu, value.Spec.Hard.RequestsMemory,
+	//			value.Status.Used.LimitsCpu, value.Status.Used.LimitsMemory)
+	//		msg.Text = text
+	//}
+
+	switch t := event.Object.(type) {
+	case *ds.ResourcequotasObject:
+		fmt.Println("this is ResourcequotasObject")
+		text := fmt.Sprintf("project: %s\ntotal(cpu: %s, memory: %s)\nused(cpu: %s, memory: %s) ",
+			t.Metadata.Namespace,
+			t.Spec.Hard.RequestsCpu, t.Spec.Hard.RequestsMemory,
+			t.Status.Used.LimitsCpu, t.Status.Used.LimitsMemory)
+		msg.Text = text
+	case *ds.EventObject:
+		fmt.Println("this is EventObject")
+		text := fmt.Sprintf("projiect: %s\npod: %s\nhost: %s\nbuild succeed!",
+			t.InvolvedObject.Namespace,
+			t.InvolvedObject.Name,
+			t.Source.Host)
+		msg.Text = text
+	}
+
+	//text := fmt.Sprintf("projiect: %s\npod: %s\nhost: %s\nbuild succeed!",
+	//	event.Object.(ds.EventObject).InvolvedObject.Namespace,
+	//	event.Object.(ds.EventObject).InvolvedObject.Name,
+	//	event.Object.(ds.EventObject).Source.Host)
+	//msg.Text = text
 
 	body, err := json.Marshal(&msg)
 
@@ -240,6 +297,15 @@ func sendToSlack(event ds.Event) {
 	fmt.Println(string(respBody))
 }
 
+//func computerRest(event ds.Event)  {
+//	totalCup := event.Object.(ds.ResourcequotasObject).Spec.Hard.RequestsCpu
+//	for i := 0; i <= len(totalCup);i++  {
+//		if totalCup[i] > 39 {
+//			totalCup = totalCup[:i]
+//		}
+//	}
+//}
+
 func main() {
 
 	oshandler.Init(DataFoundryEnv)
@@ -250,9 +316,9 @@ func main() {
 	//fmt.Println(theOC)
 	//fmt.Println(theOC.bearerToken)
 
-	go getEvent()
+	go getEvent("resourcequotas")
 
-	//go read()
+	go getEvent("events")
 
 	router := httprouter.New()
 	//router.GET("/alarm", rootHandler)
